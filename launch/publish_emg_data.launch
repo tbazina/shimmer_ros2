@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Set environmental variable to separate output from different shimmers -->
+  <env name="ROSCONSOLE_FORMAT"
+    value="[${severity}] [${time}] [${node}]: ${message}"/>
+  <!-- start first node and load parameters -->
+  <arg name="num" default="1"/> 
+  <group ns="$(eval 'shimmer' + str(arg('num')-1))">
+    <!-- Run the shimmer_publisher node and set shimmer config as relative
+      parameters -->
+    <param name="rfcomm_port"
+      value="$(eval arg('num')-1)"/>
+    <rosparam command="load"
+      file="$(find shimmer_ros)/config/shimmer_config.yaml"/>
+    <node pkg="shimmer_ros" type="shimmer_publisher" name="shimmer_publisher"
+      output="screen">
+    </node>
+  </group>
+  
+  <!-- recursively start new node and load parameters -->
+  <include file="$(find shimmer_ros)/launch/publish_emg_data.launch"
+    if="$(eval arg('num') - 1 > 0)">
+    <arg name="num" value="$(eval arg('num') - 1)"/>
+  </include>
+</launch>

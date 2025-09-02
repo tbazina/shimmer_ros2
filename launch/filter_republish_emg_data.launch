@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Set environmental variable to separate output from different shimmers -->
+  <env name="ROSCONSOLE_FORMAT"
+    value="[${severity}] [${time}] [${node}]: ${message}"/>
+  <!-- start first node and load parameters -->
+  <arg name="num" default="1"/> 
+  <group ns="$(eval 'shimmer' + str(arg('num')-1))">
+    <!-- Run the shimmer_publisher node and set shimmer config as private
+      parameters -->
+    <rosparam command="load"
+      file="$(find shimmer_ros)/config/emg_process_config.yaml"/>
+    <node pkg="shimmer_ros" type="emg_fft_filter" name="emg_fft_filter"
+      output="screen">
+    </node>
+    <node pkg="shimmer_ros" type="emg_rectify_smooth" name="emg_rectify_smooth"
+      output="screen">
+    </node>
+  </group>
+  
+  <!-- recursively start new node and load parameters -->
+  <include file="$(find shimmer_ros)/launch/filter_republish_emg_data.launch"
+    if="$(eval arg('num') - 1 > 0)">
+    <arg name="num" value="$(eval arg('num') - 1)"/>
+  </include>
+</launch>

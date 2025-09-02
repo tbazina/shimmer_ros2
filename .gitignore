@@ -1,0 +1,12 @@
+# VS Code
+.vscode/
+
+# Logs
+log/*
+
+# Pycache
+__pycache__/
+
+# Vim swap and backup files
+*.swp
+*~

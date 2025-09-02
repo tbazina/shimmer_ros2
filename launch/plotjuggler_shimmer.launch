@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Set path to config file -->
+  <arg name="plotjuggler_config"
+    value="$(find shimmer_ros)/config/plotjuggler_config.xml"/>
+  <!-- Run plotjuggler node with config file -->
+  <node pkg="plotjuggler" type="plotjuggler" name="plotjuggler" output="screen"
+    args="$(eval '--layout ' +  str(arg('plotjuggler_config')))"/>
+</launch>
