@@ -1,5 +1,7 @@
 emg_publisher:
   ros__parameters:
+    # rfcomm port Shimmer MAC address is bound to
+    rfcomm_port_num: 0
     # Chip gain
     gain: 12
     # Internal chip data rate. Must be > than sampling rate

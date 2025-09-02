@@ -11,9 +11,11 @@ from emg_grip_interfaces.msg import Emg
 
 
 class ShimmerEMG:
-    def __init__(self, port) -> None:
-        # Serial port
-        self.port = port
+    def __init__(self, port, node_logger, node_clock) -> None:
+        # Serial port, node logger, node clock
+        self.port: str = port
+        self.node_logger = node_logger
+        self.node_clock = node_clock
 
         # // Packet Types// Packet Types
         self.packet_type = {
@@ -33,8 +35,6 @@ class ShimmerEMG:
             'DAUGHTER_CARD_ID_RESPONSE': 0x65,
             'GET_EXG_REGS_COMMAND': 0x63,
             'EXG_REGS_RESPONSE': 0x62,
-            'GET_SHIMMERNAME_COMMAND': 0x7B,
-            'SHIMMERNAME_RESPONSE': 0x7A,
             'START_STREAMING_COMMAND': 0x07,
             'STOP_STREAMING_COMMAND': 0x20,
             'DATA_PACKET': 0x00,
@@ -135,7 +135,7 @@ class ShimmerEMG:
             timeout=5.0,
             write_timeout=5.0,
         )
-        rospy.loginfo(f'Port {self.port} opened: {self.ser.is_open}')
+        self.node_logger.info(f'Port {self.port} opened: {self.ser.is_open}')
         self.ser.reset_input_buffer()
         return self.ser
 
@@ -145,7 +145,7 @@ class ShimmerEMG:
     def close_port(self):
         if self.ser.is_open:
             self.ser.close()
-            rospy.loginfo(f'Port {self.port} opened: {self.ser.is_open}')
+            self.node_logger.info(f'Port {self.port} opened: {self.ser.is_open}')
 
     def __exit__(self, exception_type, exception_value, exception_traceback):
         # Exception handling
@@ -208,7 +208,9 @@ class ShimmerEMG:
             clock_wait = struct.unpack('H', data[1:3])[0]
             self.sampling_rate = 32768 / clock_wait
             if echo:
-                rospy.loginfo(f'Shimmer sampling rate: {self.sampling_rate:.4f} Hz')
+                self.node_logger.info(
+                    f'Shimmer sampling rate: {self.sampling_rate:.4f} Hz'
+                )
             return self.sampling_rate
         else:
             raise serial.SerialException
@@ -226,10 +228,10 @@ class ShimmerEMG:
             if data[0] == self.packet_type['BUFFER_SIZE_RESPONSE']:
                 self.buffer_size = data[1]
                 if echo:
-                    rospy.loginfo(f'Buffer size: {self.buffer_size}')
+                    self.node_logger.info(f'Buffer size: {self.buffer_size}')
                 return self.buffer_size
             else:
-                rospy.logerr('Did not recieve BUFFER_SIZE_RESPONSE')
+                self.node_logger.error('Did not recieve BUFFER_SIZE_RESPONSE')
         else:
             raise serial.SerialException
 
@@ -247,10 +249,10 @@ class ShimmerEMG:
                 charge_status_num = data[1]
                 self.charge_status = self.charge_status_dict[charge_status_num]
                 if echo:
-                    rospy.loginfo(f'Charge status: {self.charge_status}')
+                    self.node_logger.info(f'Charge status: {self.charge_status}')
                 return self.charge_status
             else:
-                rospy.logerr('Did not recieve CHARGE_STATUS_LED_RESPONSE')
+                self.node_logger.error('Did not recieve CHARGE_STATUS_LED_RESPONSE')
         else:
             raise serial.SerialException
 
@@ -269,12 +271,12 @@ class ShimmerEMG:
                 self.serial_number = data[2]
                 self.revision_number = data[3]
                 if echo:
-                    rospy.loginfo(
+                    self.node_logger.info(
                         f'Device: SR{self.serial_number}-{self.revision_number}'
                     )
                 return (self.serial_number, self.revision_number)
             else:
-                rospy.logerr('Did not recieve DAUGHTER_CARD_ID_RESPONSE')
+                self.node_logger.error('Did not recieve DAUGHTER_CARD_ID_RESPONSE')
         else:
             raise serial.SerialException
 
@@ -292,10 +294,10 @@ class ShimmerEMG:
                 data = self.ser.read(data[1])
                 self.shimmer_name = data.decode('ascii')
                 if echo:
-                    rospy.loginfo(f'Device name: {self.shimmer_name}')
+                    self.node_logger.info(f'Device name: {self.shimmer_name}')
                 return self.shimmer_name
             else:
-                rospy.logerr('Did not recieve SHIMMERNAME_RESPONSE')
+                self.node_logger.error('Did not recieve SHIMMERNAME_RESPONSE')
         else:
             raise serial.SerialException
 
@@ -325,9 +327,9 @@ class ShimmerEMG:
         else:
             self.emg_gain = self.emg_gain_config_default
         if echo:
-            rospy.loginfo(f'EMG gain: {self.emg_gain}')
+            self.node_logger.info(f'EMG gain: {self.emg_gain}')
         self.emg_gain_packet = self.emg_gain_config[self.emg_gain]
-        rospy.logdebug(f'{self.emg_gain_packet:03b}')
+        self.node_logger.debug(f'{self.emg_gain_packet:03b}')
         return self.emg_gain
 
     def set_emg_data_rate(self, emg_data_rate, echo=True):
@@ -342,7 +344,7 @@ class ShimmerEMG:
                 [i for i in self.emg_data_rate_config.keys() if i > self.sampling_rate]
             )
         if echo:
-            rospy.loginfo(f'EMG chip data rate: {self.emg_data_rate} Hz')
+            self.node_logger.info(f'EMG chip data rate: {self.emg_data_rate} Hz')
         self.emg_data_rate_packet = self.emg_data_rate_config[self.emg_data_rate]
         return self.emg_data_rate
 
@@ -365,7 +367,7 @@ class ShimmerEMG:
                 if chip_num == 0:
                     self.emg_regs = emg_regs
                 if echo:
-                    rospy.logdebug(
+                    self.node_logger.debug(
                         f'EMG register settings for chip {chip_num + 1}:\n'
                         f'\tCONFIG1: {emg_regs[0]:08b}\n'
                         f'\tCONFIG2: {emg_regs[1]:08b}\n'
@@ -380,7 +382,7 @@ class ShimmerEMG:
                     )
                 return emg_regs
             else:
-                rospy.logerr('Did not recieve EXG_REGS_RESPONSE')
+                self.node_logger.error('Did not recieve EXG_REGS_RESPONSE')
         else:
             raise serial.SerialException
 
@@ -420,7 +422,7 @@ class ShimmerEMG:
         self.chip2_emg_regs[8] = 0b10
         # RESP 2 byte
         self.chip2_emg_regs[9] = self.emg_rldref_int_config['external'] << 1 | 0b1
-        # rospy.loginfo('EMG register settings for chip {}:\n'.format(chip_num+1),
+        # self.node_logger.info('EMG register settings for chip {}:\n'.format(chip_num+1),
         #       '\tCONFIG1: {:08b}\n'.format(self.chip2_emg_regs[0]),
         #       '\tCONFIG2: {:08b}\n'.format(self.chip2_emg_regs[1]),
         #       '\tLOFF: {:08b}\n'.format(self.chip2_emg_regs[2]),
@@ -448,7 +450,9 @@ class ShimmerEMG:
             )
             self.wait_for_ack()
             if echo:
-                rospy.loginfo(f'Chip {chip_num + 1} powered down for EMG measurement!')
+                self.node_logger.info(
+                    f'Chip {chip_num + 1} powered down for EMG measurement!'
+                )
             return self.chip2_emg_regs
         else:
             raise serial.SerialException
@@ -461,7 +465,7 @@ class ShimmerEMG:
             self.ser.write(struct.pack('B' * 4, *sensors))
             self.wait_for_ack()
             if echo:
-                rospy.loginfo('24 bit EMG sensor activated!')
+                self.node_logger.info('24 bit EMG sensor activated!')
         else:
             raise serial.SerialException
 
@@ -504,7 +508,7 @@ class ShimmerEMG:
         self.chip1_emg_regs[8] = 0b10
         # RESP 2 byte - RLDREF_INT to internal
         self.chip1_emg_regs[9] = self.emg_rldref_int_config['internal'] << 1 | 0b1
-        # rospy.logdebug(
+        # self.node_logger.debug(
         #   f'EMG register settings for chip {chip_num+1}:\n'
         #       f'\tCONFIG1: {self.chip1_emg_regs[0]:08b}\n'
         #       f'\tCONFIG2: {self.chip1_emg_regs[1]:08b}\n'
@@ -533,7 +537,9 @@ class ShimmerEMG:
             )
             self.wait_for_ack()
             if echo:
-                rospy.loginfo(f'Chip {chip_num + 1} EMG register settings written!')
+                self.node_logger.info(
+                    f'Chip {chip_num + 1} EMG register settings written!'
+                )
             return self.chip1_emg_regs
         else:
             raise serial.SerialException
@@ -605,7 +611,7 @@ class ShimmerEMG:
                     # Increment ID
                     sig_iter += 1
                 else:
-                    rospy.logerr(f'Did not recieve DATA_PACKET: {data}')
+                    self.node_logger.error(f'Did not recieve DATA_PACKET: {data}')
         except rospy.ROSInterruptException:
             # Send stop streaming command
             self.send_streaming_command('stop', echo=True)
@@ -632,7 +638,7 @@ class ShimmerEMG:
             self.ser.write(struct.pack('B', self.packet_type[command_type]))
             self.wait_for_ack()
             if echo:
-                rospy.loginfo(print_msg)
+                self.node_logger.info(print_msg)
         else:
             raise serial.SerialException
 
@@ -642,7 +648,9 @@ class ShimmerEMG:
         self.calibration_constant = self.adc_sensitivity / self.emg_gain
         calibration_constant = self.calibration_constant
         if echo:
-            rospy.loginfo(f'Calibration constant: {self.calibration_constant:.6e}')
+            self.node_logger.info(
+                f'Calibration constant: {self.calibration_constant:.6e}'
+            )
         if duration <= 0:
             return
         # Length of signal should correspond to duration in seconds
@@ -651,7 +659,7 @@ class ShimmerEMG:
         self.set_emg_registers(test_signal=True)
         self.get_emg_registers(chip_num=0, echo=echo)
         if echo:
-            rospy.loginfo(
+            self.node_logger.info(
                 f'Performing signal calibration ... please wait {duration} s!'
             )
         # Send start streaming command
@@ -675,7 +683,7 @@ class ShimmerEMG:
                     c1ch1_q.append(c1ch1)
                     c1ch2_q.append(c1ch2)
                 else:
-                    rospy.logerr(f'Did not recieve DATA_PACKET: {data}')
+                    self.node_logger.error(f'Did not recieve DATA_PACKET: {data}')
         except rospy.ROSInterruptException:
             # Send stop streaming command
             self.send_streaming_command('stop', echo=echo)
@@ -705,16 +713,20 @@ class ShimmerEMG:
         self.adc_offset_ch2 = sum(c1ch2) / len(c1ch2)
         self.signal_calibrated = True
         if echo:
-            rospy.loginfo('Calibration done!')
-            rospy.loginfo(f'ADC offset for Channel 1: {self.adc_offset_ch1:.6f}')
-            rospy.loginfo(f'ADC offset for Channel 2: {self.adc_offset_ch2:.6f}')
+            self.node_logger.info('Calibration done!')
+            self.node_logger.info(
+                f'ADC offset for Channel 1: {self.adc_offset_ch1:.6f}'
+            )
+            self.node_logger.info(
+                f'ADC offset for Channel 2: {self.adc_offset_ch2:.6f}'
+            )
         return
 
     def synchronise_system_time(self, ntimes=3, echo=False):
         """Get real world clock from shimmer"""
         # Firmware clock in 1/32768 sec
         if echo:
-            rospy.loginfo('Synchronising Shimmer time with system time!')
+            self.node_logger.info('Synchronising Shimmer time with system time!')
         clock_step = 32768
         rate = rospy.Rate(2)  # 2 Hz
         if self.ser.is_open:
@@ -735,11 +747,11 @@ class ShimmerEMG:
                     system_dt = datetime.fromtimestamp(system_ts.to_sec())
                     system_timestamp = system_dt.timestamp()
                     if echo:
-                        rospy.loginfo(
+                        self.node_logger.info(
                             f'Shimmer3 time: {dt},\t timestamp: {timestamp},\t'
                         )
                     if echo:
-                        rospy.loginfo(
+                        self.node_logger.info(
                             f'System time:   {system_dt},\t timestamp: {system_timestamp}\t'
                         )
                     # Sending set real world clock command
@@ -758,6 +770,6 @@ class ShimmerEMG:
                     # Wait till specific rate finished
                     rate.sleep()
                 else:
-                    rospy.logerr('Did not recieve RWC_RESPONSE!')
+                    self.node_logger.error('Did not recieve RWC_RESPONSE!')
         else:
             raise serial.SerialException
