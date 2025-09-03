@@ -24,7 +24,10 @@ setup(
     license='Apache-2.0',
     tests_require=['pytest'],
     entry_points={
-        'console_scripts': [],
+        'console_scripts': [
+            'simple_publisher = shimmer_ros2.nodes.simple_publisher:main',
+            'shimmer_publisher = shimmer_ros2.nodes.shimmer_publisher:main',
+        ],
     },
     scripts=['scripts/bind_shimmer_to_rfcomm.sh'],
 )

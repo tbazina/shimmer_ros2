@@ -3,11 +3,13 @@
 ## Stream acquired emg signal from both channels to the topic emg_stream.
 
 import sys
+import traceback
 
 import rclpy  # type: ignore
-import rospy
 import serial
-from emg_grip_interfaces.msg import Emg
+from emg_grip_interfaces.msg import Emg  # type: ignore
+from rclpy.duration import Duration  # type: ignore
+from rclpy.executors import ExternalShutdownException  # type: ignore
 from rclpy.node import Node  # type: ignore
 from rclpy.qos import QoSProfile  # type: ignore
 
@@ -16,14 +18,27 @@ from shimmer_ros2.shimmer_api.emg import ShimmerEMG
 
 class EMGPublisher(Node):
     def __init__(self) -> None:
+        """
+        Configure and capture EMG signal from Shimmer3 device.
+        Stream acquired emg signal from both channels to the topic emg_stream.
+
+        ROS parameters:
+        rfcomm_port_num (int): rfcomm port Shimmer MAC adress is bound to
+        gain (int): Chip gain
+        emg_data_rate (int): Internal chip data (sampling) rate in Hz
+        sampling_rate (float): Shimmer sampling rate in Hz
+        stream_test_signal (bool): Stream test signal (1 Hz square wave, +-1 amplitude)
+        zero_test_signal (bool): Use test signal to zero ADC offset
+        queue_size (int): Size of the queue for asynchronous publishing on topic
+        """
         super().__init__('emg_publisher')
         self.param_defaults: dict[str, float | int] = {
             'rfcomm_port_num': 0,  # rfcomm port Shimmer MAC adress is bound to
             'gain': 12,
-            'emg_data_rate': 125,  # Hz, will be auto set to > sampling_rate
+            'emg_data_rate': 1,  # Hz, will be auto set to > sampling_rate
             'sampling_rate': 992.96969699,  # Hz
             'stream_test_signal': False,  #
-            'calibrate_test_signal': 4,  # Calibration duration in seconds (0 - no calibration)
+            'zero_test_signal': 4,  # Zeroing duration in seconds (0 - no calibration)
             'queue_size': 10,
         }
         # Declare all parameters into a single dict
@@ -32,31 +47,45 @@ class EMGPublisher(Node):
             for key, default_value in self.param_defaults.items()
         }
         # Create publisher
-        self.publisher_ = self.create_publisher(
+        self.publisher = self.create_publisher(
             msg_type=Emg,
             topic='emg_stream',
             qos_profile=QoSProfile(depth=self.params['queue_size']),
         )
+
+    def initialize_shimmer_start_streaming_emg(self):
         # Initialize Shimmer sensor
-        self.shimmer = ShimmerEMG(
-            port=f'/dev/rfcomm{self.params["rfcomm_port_num"]}',
-            node_logger=self.get_logger(),
-            node_clock=self.get_clock(),
-        )
-        # Open and set up Shimmer device
-        self.shimmer_emg = self.shimmer.__enter__()
         try:
+            self.shimmer = ShimmerEMG(
+                port=f'/dev/rfcomm{self.params["rfcomm_port_num"]}',
+                node_logger=self.get_logger(),
+                node_clock=self.get_clock(),
+            )
+            # Open and set up Shimmer device
+            self.shimmer_emg = self.shimmer.__enter__()
             self.setup_shimmer()
+            self.get_logger().info('Publishing EMG data. Press Ctrl+C to stop ...')
+            # Create timer using period from sampling_rate
+            self.timer = self.create_timer(
+                timer_period_sec=1.0 / self.params['sampling_rate'],
+                callback=self.publish_sensor_value,
+            )
+        except serial.SerialTimeoutException:
+            sys.exit('Write timeout exceeded!')
+        except serial.SerialException:
+            sys.exit('The device not found - serial port closed! (check serial_port)')
+        except (KeyboardInterrupt, ExternalShutdownException):
+            self.get_logger().warn('User interrupted execution!')
         except Exception as e:
             self.get_logger().error(f'Failed to set up Shimmer: {e}')
-        self.timer = self.create_timer(0.1, self.timer_callback)
+            self.get_logger().debug(traceback.format_exc())
 
     def setup_shimmer(self):
         self.shimmer_emg.get_shimmer_name(echo=True)
         self.shimmer_emg.get_id_and_rev(echo=True)
         self.shimmer_emg.get_charge_status_led(echo=True)
         self.shimmer_emg.get_buffer_size(echo=True)
-        self.shimmer_emg.synchronise_system_time(echo=True)
+        self.shimmer_emg.synchronize_system_time(echo=True)
         self.shimmer_emg.set_sampling_rate(sampling_rate=self.params['sampling_rate'])
         self.shimmer_emg.set_emg_data_rate(emg_data_rate=self.params['emg_data_rate'])
         self.shimmer_emg.set_emg_gain(gain=self.params['gain'])
@@ -65,21 +94,40 @@ class EMGPublisher(Node):
         # Power down chip 2 and print register settings
         self.shimmer_emg.power_down_chip_2()
         self.shimmer_emg.get_emg_registers(chip_num=1, echo=True)
-        # Calibrate using test signal and store calibration parameters
-        self.shimmer_emg.calibrate_test_signal(
-            duration=self.params['calibrate_test_signal'], echo=True
+        # zero using test signal and store calibration parameters
+        self.shimmer_emg.zero_test_signal(
+            duration=self.params['zero_test_signal'], echo=True
+        )
+        self.shimmer_emg.start_streaming_emg(
+            publisher=self.publisher,
+            test_signal=self.params['stream_test_signal'],
+            echo=True,
         )
 
-    def timer_callback(self):
-        msg = Emg()
-        # Fill in the message fields
-        self.publisher_.publish(msg)
+    def publish_sensor_value(self):
+        try:
+            # Read data from Shimmer and publish
+            self.shimmer_emg.read_publish_single_point()
+        except Exception as e:
+            self.get_logger().error(f'Failed to publish EMG data: {e}')
+            self.get_logger().debug(traceback.format_exc())
+
+    def destroy_node(self):
+        try:
+            self.shimmer_emg.send_streaming_command('stop', echo=True)
+            self.get_clock().sleep_for(Duration(seconds=0.1))
+            self.ser.reset_input_buffer()
+            self.shimmer_emg.__exit__(None, None, None)
+        except Exception as e:
+            self.get_logger().error(f'Error closing Shimmer: {e}')
+        return super().destroy_node()
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = EMGPublisher()
     try:
+        node = EMGPublisher()
+        node.initialize_shimmer_start_streaming_emg()
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
@@ -90,69 +138,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-
-
-def publish_emg():
-    """
-    Configure and capture EMG signal from Shimmer3 device.
-    Stream acquired emg signal from both channels to the topic emg_stream.
-
-    ROS parameters:
-      rfcomm_num (int): rfcomm port Shimmer MAC adress is bound to
-      gain (int): Chip gain
-      emg_data_rate (int): Internal chip data (sampling) rate in Hz
-      sampling_rate (int): Shimmer sampling rate in Hz
-      stream_test_signal (bool): Stream test signal (1 Hz square wave, +-1 amplitude)
-      calibrate_test_signal (bool): Use test signal to calibrate ADC offset
-      queue_size (int): Size of the queue for asynchronous publishing on topic
-    """
-    # Initialize node and Publisher
-    rospy.init_node(
-        'shimmer_publisher',
-        anonymous=False,
-        log_level=rospy.DEBUG,
-    )
-    try:
-        # Get shimmer parameters
-        serial_port = f'/dev/rfcomm{rospy.get_param("rfcomm_port")}'
-        gain = rospy.get_param('gain')
-        emg_data_rate = rospy.get_param('emg_data_rate', 1)  # Hz
-        sampling_rate = rospy.get_param('sampling_rate', 50)  # Hz
-        stream_test_signal = rospy.get_param('stream_test_signal', False)
-        calibrate_test_signal = rospy.get_param('calibrate_test_signal')
-        queue_size = rospy.get_param('queue_size', 10)
-        # Initialize publisher with queue size
-        pub = rospy.Publisher('emg_stream', Emg, queue_size=queue_size)
-        # Initialize Shimmer
-        Shimmer = ShimmerEMG(serial_port)
-        with Shimmer as sh:
-            # Display and set configuration parameters
-            Shimmer.get_shimmer_name(echo=True)
-            Shimmer.get_id_and_rev(echo=True)
-            Shimmer.get_charge_status_led(echo=True)
-            Shimmer.get_buffer_size(echo=True)
-            Shimmer.synchronise_system_time(echo=True)
-            Shimmer.set_sampling_rate(sampling_rate=sampling_rate)
-            Shimmer.set_emg_data_rate(emg_data_rate=emg_data_rate)
-            Shimmer.set_emg_gain(gain=gain)
-            # Activate EMG sensors
-            Shimmer.activate_emg_sensors()
-            # Power down chip 2 and print register settings
-            Shimmer.power_down_chip_2()
-            Shimmer.get_emg_registers(chip_num=1, echo=True)
-            # Calibrate using test signal and store calibration parameters
-            Shimmer.calibrate_test_signal(duration=calibrate_test_signal, echo=True)
-            # Start streaming signal to topic
-            Shimmer.start_streaming_EMG(
-                publisher=pub,
-                test_signal=stream_test_signal,
-                echo=True,
-            )
-    except serial.SerialTimeoutException:
-        sys.exit('Write timeout exceeded!')
-    except serial.SerialException:
-        sys.exit('The device not found - serial port closed! (check serial_port)')
-    except rospy.ROSInterruptException:
-        rospy.logwarn('User interrupted execution!')
-    except rospy.ROSException:
-        print('Could not get parameter names!')

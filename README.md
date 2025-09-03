@@ -27,10 +27,10 @@ sudo ros2 run shimmer_ros2 bind_shimmer_to_rfcomm.sh <MAC1> [<MAC2> ...]
 ## Streaming EMG data
 
 1. Edit the Shimmer configuration in `config/shimmer_config.yaml`.
-2. Launch the EMG publisher (replace `<num>` with the number of sensors):
+2. Launch the EMG publisher:
 
 ```bash
-ros2 launch shimmer_ros2 publish_emg_data.launch num:=<num>
+ros2 launch shimmer_ros2 publish_emg.launch.py
 ```
 
 ## Visualizing data

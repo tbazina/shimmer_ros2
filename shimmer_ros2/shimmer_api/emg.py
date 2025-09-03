@@ -5,17 +5,20 @@ import sys
 from collections import defaultdict, deque
 from datetime import datetime
 
-import rospy
 import serial
-from emg_grip_interfaces.msg import Emg
+from emg_grip_interfaces.msg import Emg  # type: ignore
+from rclpy.clock import Clock  # type: ignore
+from rclpy.duration import Duration  # type: ignore
+from rclpy.executors import ExternalShutdownException  # type: ignore
+from rclpy.time import Time  # type: ignore
 
 
 class ShimmerEMG:
-    def __init__(self, port, node_logger, node_clock) -> None:
+    def __init__(self, port, node_logger, node_clock: Clock) -> None:
         # Serial port, node logger, node clock
         self.port: str = port
         self.node_logger = node_logger
-        self.node_clock = node_clock
+        self.node_clock: Clock = node_clock
 
         # // Packet Types// Packet Types
         self.packet_type = {
@@ -62,7 +65,8 @@ class ShimmerEMG:
             lambda: 0b1001,  # Route INxP and INxN to channel x inputs
             {
                 'normal': 0b0000,  # Normal electrode input (default)
-                'shorted': 0b0001,  # Input shorted (for offset measurements and power down channel)
+                'shorted': 0b0001,
+                # Input shorted (for offset measurements and power down channel)
                 'test': 0b0101,  # Test signal
                 'measure_EMG': 0b1001,  # Route INxP and INxN to channel x inputs
             },
@@ -110,7 +114,7 @@ class ShimmerEMG:
         # EMG 24 bit sensor activation
         self.emg_24bit = [0x18, 0x00, 0x00]
 
-        # Signal calibration parameters
+        # Signal zeroing parameters
         self.adc_offset_ch1 = 0
         self.adc_offset_ch2 = 0
         self.adc_sensitivity = 2420 / (2**23 - 1)
@@ -125,8 +129,8 @@ class ShimmerEMG:
             },
         )
 
-        # Signal calibrated indicator
-        self.signal_calibrated = False
+        # Signal zeroed indicator
+        self.signal_zeroed = False
 
     def open_port(self):
         self.ser = serial.Serial(
@@ -137,10 +141,10 @@ class ShimmerEMG:
         )
         self.node_logger.info(f'Port {self.port} opened: {self.ser.is_open}')
         self.ser.reset_input_buffer()
-        return self.ser
 
     def __enter__(self):
-        return self.open_port()
+        self.open_port()
+        return self
 
     def close_port(self):
         if self.ser.is_open:
@@ -359,7 +363,7 @@ class ShimmerEMG:
                 )
             )
             self.wait_for_ack()
-            # Read incoming data bytes (EXG_REGS_RESPONSE + number of bytes + 10 registers)
+            # Read incoming data bytes (EXG_REGS_RESPONSE + num of bytes + 10 registers)
             data = self.ser.read(size=12)
             if data[0] == self.packet_type['EXG_REGS_RESPONSE']:
                 emg_regs = list(struct.unpack('B' * 10, data[2:]))
@@ -544,87 +548,84 @@ class ShimmerEMG:
         else:
             raise serial.SerialException
 
-    def start_streaming_EMG(self, publisher, test_signal=False, echo=True):
+    def read_publish_single_point(self) -> None:
+        # ROS message
+        emg_data: Emg = Emg()
+        emg_data.header.frame_id = self.shimmer_name
+        clock_ticks_ref: int | None = None
+        try:
+            data = self.ser.read(size=self.framesize)
+            if data[0] == self.packet_type['DATA_PACKET']:
+                # Convert bytes to internal clock_ticks
+                clock_ticks: int = int.from_bytes(data[1:4], 'little')
+                # Resync with ROS time or handle clock_tick overflow
+                # after after 3 bytes max uint - 16777215
+                # max time: 511.9999 sec or 8.5333 min
+                # (exploit OR evaluating only first condition if True)
+                if clock_ticks_ref is None or clock_ticks <= clock_ticks_ref:
+                    # Set starting time
+                    time_start: Time = self.node_clock.now()
+                    # Set now clock ticks to zero reference
+                    clock_ticks_ref = clock_ticks
+                # Convert to duration in nsecs
+                duration = Duration(
+                    nanoseconds=(
+                        ((clock_ticks - clock_ticks_ref) * 1_000_000_000)
+                        // self.clock_step
+                    )
+                )
+                emg_data.header.stamp = (time_start + duration).to_msg()
+                # Convert chip 1, channel 1 and 2 data to integer values
+                c1ch1: int | float = int.from_bytes(
+                    data[5:8], byteorder='big', signed=True
+                )
+                c1ch2: int | float = int.from_bytes(
+                    data[8:11], byteorder='big', signed=True
+                )
+                # Zero emg channels using constant and offset:
+                c1ch1 = c1ch1 * self.zeroing_constant - self.adc_offset_ch1
+                c1ch2 = c1ch2 * self.zeroing_constant - self.adc_offset_ch2
+                # Publish acquired data to topic
+                emg_data.emg_ch1 = c1ch1
+                emg_data.emg_ch2 = c1ch2
+                self.publisher.publish(emg_data)
+            else:
+                self.node_logger.error(f'Did not recieve DATA_PACKET: {data}')
+        except KeyboardInterrupt:
+            self.stop_streaming()
+            raise KeyboardInterrupt
+        except ExternalShutdownException:
+            self.stop_streaming()
+            raise ExternalShutdownException
+        except:
+            self.stop_streaming()
+            raise
+
+    def start_streaming_emg(self, publisher, test_signal=False, echo=True) -> None:
         """
         Start streaming EMG signal from both channels to desired publisher.
         Set chip 1 settings,
         Start streaming EMG signal
         Args:
-            test_signal (bool, optional): stream/test/acquired signal. Defaults to False.
-            echo (bool, optional): print info to console. Defaults to True.
+            test_signal (bool, optional): stream/test/acquired signal. Default False.
+            echo (bool, optional): print info to console. Default True.
         """
-        # Calibration constants and name
-        self.calibration_constant = self.adc_sensitivity / self.emg_gain
-        calibration_constant = self.calibration_constant
-        adc_offset_ch1 = self.adc_offset_ch1
-        adc_offset_ch2 = self.adc_offset_ch2
-        shimmer_name = self.shimmer_name
+        # Zeroing constants and name
+        self.publisher = publisher
+        self.zeroing_constant: float = self.adc_sensitivity / self.emg_gain
         # Set the chip 1 configuration registers
         self.set_emg_registers(test_signal=test_signal)
         self.get_emg_registers(chip_num=0, echo=echo)
         # Read incoming data
         # 1 byte packet type, 3 bytes timestamp, 14 bytes EMG data
-        framesize = 18
+        self.framesize: int = 18
         # Firmware clock in 1/32768 sec
-        clock_step = 32768
-        # ROS message
-        emg_data = Emg()
-        emg_data.header.frame_id = shimmer_name
-        # Iterator
-        sig_iter = 0
+        self.clock_step: int = 32768
         # Send start streaming command
         self.send_streaming_command('start', echo=True)
         # Sleep for 0.5 sec before data acquisition to make sure clock ticks are
         # sufficiently large
-        rospy.sleep(0.5)
-        try:
-            while not rospy.is_shutdown():
-                data = self.ser.read(size=framesize)
-                if data[0] == self.packet_type['DATA_PACKET']:
-                    # Convert bytes to internal clock_ticks
-                    clock_ticks = int.from_bytes(data[1:4], 'little')
-                    # Resync with ROS time or handle clock_tick overflow
-                    # after after 3 bytes max uint - 16777215
-                    # max time: 511.9999 sec or 8.5333 min
-                    # (exploit OR evaluating only first condition if True)
-                    if sig_iter == 0 or clock_ticks <= clock_ticks_ref:
-                        # Set starting time
-                        time_start = rospy.Time.now()
-                        # Set now clock ticks to zero reference
-                        clock_ticks_ref = clock_ticks
-                    # Convert to duration in secs and nsecs
-                    duration = rospy.Duration.from_sec(
-                        (clock_ticks - clock_ticks_ref) / clock_step
-                    )
-                    emg_data.header.stamp = time_start + duration
-                    # Convert chip 1, channel 1 and 2 data to integer values
-                    c1ch1 = int.from_bytes(data[5:8], byteorder='big', signed=True)
-                    c1ch2 = int.from_bytes(data[8:11], byteorder='big', signed=True)
-                    # Calibrate emg channels using constant and offset:
-                    c1ch1 = c1ch1 * calibration_constant - adc_offset_ch1
-                    c1ch2 = c1ch2 * calibration_constant - adc_offset_ch2
-                    # Publish acquired data to topic
-                    emg_data.emg_ch1 = c1ch1
-                    emg_data.emg_ch2 = c1ch2
-                    emg_data.header.seq = sig_iter
-                    publisher.publish(emg_data)
-                    # Increment ID
-                    sig_iter += 1
-                else:
-                    self.node_logger.error(f'Did not recieve DATA_PACKET: {data}')
-        except rospy.ROSInterruptException:
-            # Send stop streaming command
-            self.send_streaming_command('stop', echo=True)
-            # Necessary to wait a bit before flushing input
-            rospy.sleep(0.1)
-            self.ser.reset_input_buffer()
-            raise rospy.ROSInterruptException
-        # Send stop streaming command
-        self.send_streaming_command('stop', echo=True)
-        # Necessary to wait a bit before flushing input
-        rospy.sleep(0.1)
-        self.ser.reset_input_buffer()
-        return
+        self.node_clock.sleep_for(Duration(seconds=0.5))
 
     def send_streaming_command(self, command='start', echo=False):
         """Send start streaming command to Shimmer3"""
@@ -642,16 +643,24 @@ class ShimmerEMG:
         else:
             raise serial.SerialException
 
-    def calibrate_test_signal(self, duration=5, echo=True):
-        """Calibrate ADC_offset using square test signal"""
-        # Calibration constant
-        self.calibration_constant = self.adc_sensitivity / self.emg_gain
-        calibration_constant = self.calibration_constant
+    def stop_streaming(self):
+        # Send stop streaming command
+        self.send_streaming_command('stop', echo=True)
+        # Necessary to wait a bit before flushing input
+        self.node_clock.sleep_for(Duration(seconds=0.1))
+        self.ser.reset_input_buffer()
+
+    def zero_test_signal(self, duration=5, echo=True) -> None:
+        """Zero ADC_offset using square test signal"""
+        # Zeroing constant
+        self.zeroing_constant = self.adc_sensitivity / self.emg_gain
         if echo:
-            self.node_logger.info(
-                f'Calibration constant: {self.calibration_constant:.6e}'
-            )
+            self.node_logger.info(f'Zeroing constant: {self.zeroing_constant:.6e}')
         if duration <= 0:
+            if echo:
+                self.node_logger.warning(
+                    'Invalid zeroing duration. Duration must be positive.'
+                )
             return
         # Length of signal should correspond to duration in seconds
         signal_length = round(self.sampling_rate * duration)
@@ -660,42 +669,43 @@ class ShimmerEMG:
         self.get_emg_registers(chip_num=0, echo=echo)
         if echo:
             self.node_logger.info(
-                f'Performing signal calibration ... please wait {duration} s!'
+                f'Performing signal zeroing ... please wait {duration} s!'
             )
         # Send start streaming command
         self.send_streaming_command('start', echo=True)
+        self.node_clock.sleep_for(Duration(seconds=0.2))
         # Read incoming data
         # 1 byte packet type, 3 bytes timestamp, 14 bytes EMG data
-        framesize = 18
+        self.framesize = 18
         # Queue for faster data acquisition
-        c1ch1_q, c1ch2_q = deque(maxlen=int(1e6)), deque(maxlen=int(1e6))
+        c1ch1_q: deque = deque(maxlen=int(1e6))
+        c1ch2_q: deque = deque(maxlen=int(1e6))
         try:
             for _ in range(signal_length):
-                data = self.ser.read(size=framesize)
+                data = self.ser.read(size=self.framesize)
                 if data[0] == self.packet_type['DATA_PACKET']:
                     # Convert chip 1, channel 1 and 2 data to integer values
-                    c1ch1 = int.from_bytes(data[5:8], byteorder='big', signed=True)
-                    c1ch2 = int.from_bytes(data[8:11], byteorder='big', signed=True)
-                    # Calibrate emg channels using constant and offset:
-                    c1ch1 = c1ch1 * calibration_constant
-                    c1ch2 = c1ch2 * calibration_constant
+                    c1ch1: int | float | list = int.from_bytes(
+                        data[5:8], byteorder='big', signed=True
+                    )
+                    c1ch2: int | float | list = int.from_bytes(
+                        data[8:11], byteorder='big', signed=True
+                    )
+                    # Zero emg channels using constant and offset:
+                    c1ch1 = c1ch1 * self.zeroing_constant
+                    c1ch2 = c1ch2 * self.zeroing_constant
                     # Append results to deque
                     c1ch1_q.append(c1ch1)
                     c1ch2_q.append(c1ch2)
                 else:
                     self.node_logger.error(f'Did not recieve DATA_PACKET: {data}')
-        except rospy.ROSInterruptException:
-            # Send stop streaming command
-            self.send_streaming_command('stop', echo=echo)
-            # Necessary to wait a bit before flushing input
-            rospy.sleep(0.2)
-            self.ser.reset_input_buffer()
-            raise rospy.ROSInterruptException
-        # Send stop streaming command
-        self.send_streaming_command('stop', echo=echo)
-        # Necessary to wait a bit before flushing input
-        rospy.sleep(0.2)
-        self.ser.reset_input_buffer()
+        except KeyboardInterrupt:
+            self.stop_streaming()
+            raise KeyboardInterrupt
+        except ExternalShutdownException:
+            self.stop_streaming()
+            raise ExternalShutdownException
+        self.stop_streaming()
         # Retain only values with amplitude near -1 and 1
         c1ch1 = [i for i in c1ch1_q if abs(abs(i) - 1) < 0.1]
         c1ch2 = [i for i in c1ch2_q if abs(abs(i) - 1) < 0.1]
@@ -711,40 +721,41 @@ class ShimmerEMG:
         # Calculate ADC offset as signal mean value
         self.adc_offset_ch1 = sum(c1ch1) / len(c1ch1)
         self.adc_offset_ch2 = sum(c1ch2) / len(c1ch2)
-        self.signal_calibrated = True
+        self.signal_zeroed = True
         if echo:
-            self.node_logger.info('Calibration done!')
+            self.node_logger.info('Zeroing done!')
             self.node_logger.info(
                 f'ADC offset for Channel 1: {self.adc_offset_ch1:.6f}'
             )
             self.node_logger.info(
                 f'ADC offset for Channel 2: {self.adc_offset_ch2:.6f}'
             )
-        return
 
-    def synchronise_system_time(self, ntimes=3, echo=False):
+    def synchronize_system_time(self, ntimes=3, echo=False) -> None:
         """Get real world clock from shimmer"""
         # Firmware clock in 1/32768 sec
         if echo:
-            self.node_logger.info('Synchronising Shimmer time with system time!')
-        clock_step = 32768
-        rate = rospy.Rate(2)  # 2 Hz
+            self.node_logger.info('Synching Shimmer time with system time!')
+        self.clock_step = 32768
         if self.ser.is_open:
-            for i in range(ntimes):
+            for _ in range(ntimes):
                 # Capture ROS time to timestamp
-                system_ts = rospy.Time.now()
+                system_ts: Time = self.node_clock.now()
                 self.ser.write(struct.pack('B', self.packet_type['GET_RWC_COMMAND']))
                 self.wait_for_ack()
                 # Read 9 bytes - first response and 8 system time in clock time
-                data = self.ser.read(9)
+                data: bytes = self.ser.read(9)
                 if data[0] == self.packet_type['RWC_RESPONSE']:
                     # Convert bytes to internal clock_ticks
                     clock_ticks = int.from_bytes(data[1:], 'little')
                     # Convert to timestamp in secs
-                    timestamp = clock_ticks / clock_step
+                    timestamp = clock_ticks / self.clock_step
                     dt = datetime.fromtimestamp(timestamp)
                     # Convert ROS time to datetime
-                    system_dt = datetime.fromtimestamp(system_ts.to_sec())
+                    system_ts_sec, system_ts_nsec = system_ts.seconds_nanoseconds()
+                    system_dt = datetime.fromtimestamp(
+                        system_ts_sec + system_ts_nsec * 1e-9
+                    )
                     system_timestamp = system_dt.timestamp()
                     if echo:
                         self.node_logger.info(
@@ -755,20 +766,23 @@ class ShimmerEMG:
                             f'System time:   {system_dt},\t timestamp: {system_timestamp}\t'
                         )
                     # Sending set real world clock command
+                    timestamp_send_sec, timestamp_send_nsec = (
+                        self.node_clock.now().seconds_nanoseconds()
+                    )
+                    timestamp_bytes = round(
+                        (timestamp_send_sec + timestamp_send_nsec * 1e-9)
+                        * self.clock_step
+                    ).to_bytes(8, 'little')
                     self.ser.write(
                         struct.pack(
                             'B' * 9,
                             self.packet_type['SET_RWC_COMMAND'],
-                            *(
-                                (
-                                    round(rospy.Time.now().to_sec() * clock_step)
-                                ).to_bytes(8, 'little')
-                            ),
+                            *(timestamp_bytes),
                         )
                     )
                     self.wait_for_ack()
-                    # Wait till specific rate finished
-                    rate.sleep()
+                    # Wait for 0.5 seconds
+                    self.node_clock.sleep_for(Duration(seconds=0.5))
                 else:
                     self.node_logger.error('Did not recieve RWC_RESPONSE!')
         else:
