@@ -33,6 +33,12 @@ sudo ros2 run shimmer_ros2 bind_shimmer_to_rfcomm.sh <MAC1> [<MAC2> ...]
 ros2 launch shimmer_ros2 publish_emg.launch.py
 ```
 
+3. Process EMG signal:
+
+```bash
+ros2 launch shimmer_ros2 process_emg.launch.py
+```
+
 ## Visualizing data
 
 Use PlotJuggler to visualize streamed EMG data (configuration in `config/plotjuggler_config.xml`):

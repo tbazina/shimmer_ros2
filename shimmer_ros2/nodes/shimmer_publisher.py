@@ -142,9 +142,9 @@ class EMGPublisher(Node):
         super().destroy_node()
 
 
-def main(args=None):
+def main(args=None) -> None:
     rclpy.init(args=args)
-    node = EMGPublisher()
+    node: EMGPublisher = EMGPublisher()
     try:
         node.initialize_shimmer_start_streaming_emg()
         # Set to run destroy_node on shutdown

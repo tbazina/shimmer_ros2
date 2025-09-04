@@ -27,6 +27,7 @@ setup(
         'console_scripts': [
             'simple_publisher = shimmer_ros2.nodes.simple_publisher:main',
             'shimmer_publisher = shimmer_ros2.nodes.shimmer_publisher:main',
+            'emg_processor = shimmer_ros2.nodes.emg_processor:main',
         ],
     },
     scripts=['scripts/bind_shimmer_to_rfcomm.sh'],
