@@ -8,7 +8,6 @@ import traceback
 import rclpy  # type: ignore
 import serial
 from emg_grip_interfaces.msg import Emg  # type: ignore
-from rclpy.duration import Duration  # type: ignore
 from rclpy.executors import ExternalShutdownException  # type: ignore
 from rclpy.node import Node  # type: ignore
 from rclpy.qos import QoSProfile  # type: ignore
@@ -105,35 +104,56 @@ class EMGPublisher(Node):
         )
 
     def publish_sensor_value(self):
-        try:
-            # Read data from Shimmer and publish
-            self.shimmer_emg.read_publish_single_point()
-        except Exception as e:
-            self.get_logger().error(f'Failed to publish EMG data: {e}')
-            self.get_logger().debug(traceback.format_exc())
+        # Read data from Shimmer and publish
+        self.shimmer_emg.read_publish_single_point()
 
     def destroy_node(self):
+        """
+        Called exactly once, from any thread, when SIGINT or launch
+        shutdown occurs. Cancel timers first, then stop Shimmer, then
+        close the serial port. Do NOT use ROS logging / publishers after
+        rclpy is shut down.
+        """
+        # Use print() in exceptions because logger may already be invalid
+        # Cancel the publish timer so no more callbacks run
+        if hasattr(self, 'timer'):
+            print('Cancelling publish timer …', file=sys.stdout)
+            self.timer.cancel()
+
+        # Destroy publisher
         try:
-            self.shimmer_emg.send_streaming_command('stop', echo=True)
-            self.get_clock().sleep_for(Duration(seconds=0.1))
-            self.ser.reset_input_buffer()
-            self.shimmer_emg.__exit__(None, None, None)
+            print('Destroying publisher …', file=sys.stdout)
+            self.destroy_publisher(self.publisher)
         except Exception as e:
-            self.get_logger().error(f'Error closing Shimmer: {e}')
-        return super().destroy_node()
+            print(f'Error destroying publisher: {e}', file=sys.stderr)
+
+        # Stop streaming and close Shimmer
+        try:
+            print('Stopping Shimmer EMG stream …', file=sys.stdout)
+            self.shimmer_emg.stop_streaming()
+        except Exception as e:
+            print(f'Error stopping streaming: {e}', file=sys.stderr)
+
+        try:
+            print('Closing Shimmer port …', file=sys.stdout)
+            self.shimmer.__exit__(None, None, None)
+        except Exception as e:
+            print(f'Error closing Shimmer port: {e}', file=sys.stderr)
+        super().destroy_node()
 
 
 def main(args=None):
     rclpy.init(args=args)
+    node = EMGPublisher()
     try:
-        node = EMGPublisher()
         node.initialize_shimmer_start_streaming_emg()
+        # Set to run destroy_node on shutdown
         rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
+    except (KeyboardInterrupt, ExternalShutdownException):
         node.destroy_node()
-        rclpy.shutdown()
+    finally:
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

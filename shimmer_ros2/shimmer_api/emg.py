@@ -5,6 +5,7 @@ import sys
 from collections import defaultdict, deque
 from datetime import datetime
 
+import rclpy  # type: ignore
 import serial
 from emg_grip_interfaces.msg import Emg  # type: ignore
 from rclpy.clock import Clock  # type: ignore
@@ -149,7 +150,8 @@ class ShimmerEMG:
     def close_port(self):
         if self.ser.is_open:
             self.ser.close()
-            self.node_logger.info(f'Port {self.port} opened: {self.ser.is_open}')
+            # Use print() because logger may be invalid during shutdown
+            print(f'Port {self.port} opened: {self.ser.is_open}', file=sys.stdout)
 
     def __exit__(self, exception_type, exception_value, exception_traceback):
         # Exception handling
@@ -588,7 +590,8 @@ class ShimmerEMG:
                 # Publish acquired data to topic
                 emg_data.emg_ch1 = c1ch1
                 emg_data.emg_ch2 = c1ch2
-                self.publisher.publish(emg_data)
+                if rclpy.ok():
+                    self.publisher.publish(emg_data)
             else:
                 self.node_logger.error(f'Did not recieve DATA_PACKET: {data}')
         except KeyboardInterrupt:
