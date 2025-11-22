@@ -280,6 +280,11 @@ class EMGProcessor(Node):
         if not self.processed_emg_msg.header.frame_id:
             self.processed_emg_msg.header.frame_id = self.frame_id
         if rclpy.ok():
+            # print lengths of all arrays
+            # self.get_logger().info(
+            #     f'Publishing processed EMG data, lengths: '
+            #     f'{len(processed_emg_ch1)}, {len(processed_emg_ch2)}, {len(timestamp)}'
+            # )
             # Convert processed_emg to list and publish each sample with its timestamp
             processed_emg_ch1 = processed_emg_ch1.astype(np.float32).tolist()
             processed_emg_ch2 = processed_emg_ch2.astype(np.float32).tolist()

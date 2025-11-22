@@ -34,7 +34,7 @@ class EMGPublisher(Node):
         self.param_defaults: dict[str, float | int] = {
             'rfcomm_port_num': 0,  # rfcomm port Shimmer MAC adress is bound to
             'gain': 12,
-            'emg_data_rate': 1,  # Hz, will be auto set to > sampling_rate
+            'emg_data_rate': 1000,  # Hz, will be auto set to > sampling_rate
             'sampling_rate': 992.96969699,  # Hz
             'stream_test_signal': False,  #
             'zero_test_signal': 4,  # Zeroing duration in seconds (0 - no calibration)

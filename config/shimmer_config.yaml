@@ -5,7 +5,7 @@ emg_publisher:
     # Chip gain
     gain: 12
     # Internal chip data rate. Must be > than sampling rate
-    emg_data_rate: 125 # Hz
+    emg_data_rate: 1000 # Hz
     # Shimmer sampling rate
     sampling_rate: 992.96969699 # Hz
     # Stream 1 Hz square wave with +-1 amplitude test signal instead of acquired
@@ -15,7 +15,6 @@ emg_publisher:
     # Size of the queue for asynchronous publishing on topic
     queue_size: 10
 
-# TODO: ROS2 cannot parse nested lists, make flat, and reshape in code.
 emg_processor:
   ros__parameters:
     # Window size for fft filtering (as s fraction of sampling_rate)

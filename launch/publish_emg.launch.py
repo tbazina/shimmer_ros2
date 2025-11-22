@@ -20,7 +20,7 @@ def generate_launch_description() -> LaunchDescription:
             Node(
                 package='shimmer_ros2',
                 executable='shimmer_publisher',
-                name='shimmer_publisher',
+                name='emg_publisher',
                 output='screen',
                 parameters=[config_file],
             )
